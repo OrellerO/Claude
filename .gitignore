@@ -1,0 +1,51 @@
+# ignore all hidden
+.*
+# except
+!.gitattributes
+!.gitignore
+!.gitmodules
+!.github
+!.github/**
+!.yamlfmt.yaml
+!.yamllint.yml
+!.mcp.json
+!docs/**/.sessions/
+!docs/**/.reviews/
+!.capy.toml
+!.arc.yml
+
+# Logs
+logs
+*.log*
+
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# AI tools
+!.claude
+!.claude-plugin
+!klaude-plugin/.claude-plugin
+!.codex
+!.agents
+!kodex-plugin/.codex-plugin
+.capy/**
+
+!.capy
+!.capy/knowledge.db
+
+# Go build artifacts
+/vendor-profiles
+/generate-kodex
+/plugin-graph
+
+# MkDocs build output
+/site
+!.capy/AGENTS.md
+
+# Lang
+
+# python
+__pycache__/

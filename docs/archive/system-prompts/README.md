@@ -1,0 +1,21 @@
+# Session system-prompt dump
+
+Captured from the Opus 4.7 session started 2026-04-17 in `claude-toolbox`.
+
+| # | File | Source / trigger |
+|---|---|---|
+| 00 | `00-base-system-prompt.md` | Claude Code base prompt, injected at session start. `gitStatus` snapshot redacted. |
+| 01 | `01-sessionstart-capy.md` | SessionStart hook output — capy routing rules. |
+| 02 | `02-deferred-tools.md` | Deferred tool manifest (names only; schemas fetched via `ToolSearch`). |
+| 03 | `03-mcp-server-instructions.md` | MCP server self-instructions (context7, linear-server, pal, serena). serena block was truncated by the harness. |
+| 04 | `04-available-skills.md` | User-invocable skills list. |
+| 05 | `05-claudemd-block.md` | `claudeMd` envelope — references the in-repo CLAUDE.md files rather than duplicating them. |
+| 06 | `06-pretooluse-bash-hook.md` | `PreToolUse:Bash` hook nudge. Fires on Bash calls. |
+| 07 | `07-pretooluse-read-hook.md` | `PreToolUse:Read` hook nudge. Fires on Read calls. |
+| 08 | `08-task-tools-reminder.md` | Ambient "use TaskCreate" reminder — has a "never mention to the user" clause. |
+| 09 | `09-local-command-caveats.md` | Envelopes around `/effort`, `/export`, etc. |
+| 10 | `10-tool-schemas.md` | JSONSchema for the 9 non-deferred tools (Agent, Bash, Edit, Glob, Grep, Read, Skill, ToolSearch, Write). Full verbatim text including Bash git/gh sections and Agent `<example>` blocks. |
+| 11 | `11-hooks-raw-outputs.md` | Raw output for every configured hook event, captured by invoking `capy hook <type>` directly. Covers SessionStart, UserPromptSubmit, all PreToolUse matcher branches, PostToolUse, PreCompact, SessionEnd. |
+| 12 | `12-triggered-prompts.md` | Dormant prompts captured by deliberately tripping conditions: plan mode (5-phase), exited plan mode, file-shorter-than-offset, file-unchanged-since-last-read. Plus a documented subagent prompt-dump refusal and indirect tool inventory. |
+
+Anything beyond these was either tool-call content (your messages, tool results, file reads) or produced by my own responses — not additional system prompt.

@@ -1,0 +1,2673 @@
+#!/usr/bin/env bash
+# Test suite for template-sync.sh functions
+set -euo pipefail
+
+# Source shared test helpers
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/helpers.sh"
+
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FIXTURES_DIR="$SCRIPT_DIR/fixtures"
+TEMPLATE_SYNC_SCRIPT="$REPO_ROOT/.claude/toolbox/scripts/template-sync.sh"
+
+# Source the script to get access to functions
+# The script has a sourcing guard that prevents main() from running when sourced
+# shellcheck source=/dev/null
+source "$TEMPLATE_SYNC_SCRIPT"
+
+# =============================================================================
+# Section 1: Argument Parsing Tests
+# =============================================================================
+
+log_section "Section 1: Argument Parsing"
+
+# Reset globals before each test
+reset_globals() {
+  MANIFEST_PATH=".github/template-state.json"
+  STAGING_DIR=""
+  DRY_RUN=false
+  CI_MODE=false
+  TARGET_VERSION="latest"
+  APPLY_MODE=false
+  LOCAL_MODE=false
+  # Reset exclusion tracking arrays
+  EXCLUDED_FILES=()
+  SYNC_EXCLUSIONS=()
+}
+
+log_test "parse_arguments with --version flag"
+reset_globals
+parse_arguments --version v2.0.0
+assert_equals "v2.0.0" "$TARGET_VERSION" "--version sets TARGET_VERSION"
+
+log_test "parse_arguments with --dry-run flag"
+reset_globals
+parse_arguments --dry-run
+assert_equals "true" "$DRY_RUN" "--dry-run sets DRY_RUN=true"
+
+log_test "parse_arguments with --ci flag"
+reset_globals
+parse_arguments --ci
+assert_equals "true" "$CI_MODE" "--ci sets CI_MODE=true"
+
+log_test "parse_arguments with --output-dir flag"
+reset_globals
+parse_arguments --output-dir /tmp/test-staging
+assert_equals "/tmp/test-staging" "$STAGING_DIR" "--output-dir sets STAGING_DIR"
+
+log_test "parse_arguments with multiple flags"
+reset_globals
+parse_arguments --version v1.5.0 --dry-run --ci --output-dir /tmp/multi
+assert_equals "v1.5.0" "$TARGET_VERSION" "Multiple flags: TARGET_VERSION"
+assert_equals "true" "$DRY_RUN" "Multiple flags: DRY_RUN"
+assert_equals "true" "$CI_MODE" "Multiple flags: CI_MODE"
+assert_equals "/tmp/multi" "$STAGING_DIR" "Multiple flags: STAGING_DIR"
+
+log_test "parse_arguments with no flags uses defaults"
+reset_globals
+parse_arguments
+assert_equals "latest" "$TARGET_VERSION" "Default TARGET_VERSION is 'latest'"
+assert_equals "false" "$DRY_RUN" "Default DRY_RUN is false"
+assert_equals "false" "$CI_MODE" "Default CI_MODE is false"
+
+log_test "parse_arguments --version without value exits with code 2"
+reset_globals
+set +e
+output=$(parse_arguments --version 2>&1)
+exit_code=$?
+set -e
+assert_equals "2" "$exit_code" "--version without value exits with code 2"
+
+log_test "parse_arguments --output-dir without value exits with code 2"
+reset_globals
+set +e
+output=$(parse_arguments --output-dir 2>&1)
+exit_code=$?
+set -e
+assert_equals "2" "$exit_code" "--output-dir without value exits with code 2"
+
+log_test "parse_arguments with unknown option exits with code 2"
+reset_globals
+set +e
+output=$(parse_arguments --unknown-flag 2>&1)
+exit_code=$?
+set -e
+assert_equals "2" "$exit_code" "Unknown option exits with code 2"
+
+# =============================================================================
+# Section 2: Manifest Reading Tests
+# =============================================================================
+
+log_section "Section 2: Manifest Reading"
+
+log_test "read_manifest fails when file is missing"
+reset_globals
+MANIFEST_PATH="/nonexistent/manifest.json"
+set +e
+output=$(read_manifest 2>&1)
+exit_code=$?
+set -e
+assert_not_equals "0" "$exit_code" "read_manifest exits non-zero for missing file"
+
+log_test "read_manifest fails for invalid JSON"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/invalid-json.txt"
+set +e
+output=$(read_manifest 2>&1)
+exit_code=$?
+set -e
+assert_not_equals "0" "$exit_code" "read_manifest exits non-zero for invalid JSON"
+
+log_test "read_manifest succeeds for valid manifest"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+set +e
+output=$(read_manifest 2>&1)
+exit_code=$?
+set -e
+assert_equals "0" "$exit_code" "read_manifest succeeds for valid manifest"
+
+log_test "read_manifest fails when schema_version is missing"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/missing-schema-version.json"
+set +e
+output=$(read_manifest 2>&1)
+exit_code=$?
+set -e
+assert_not_equals "0" "$exit_code" "read_manifest fails for missing schema_version"
+
+log_test "read_manifest fails when variables object is missing"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/missing-variables.json"
+set +e
+output=$(read_manifest 2>&1)
+exit_code=$?
+set -e
+assert_not_equals "0" "$exit_code" "read_manifest fails for missing variables"
+
+# =============================================================================
+# Section 3: Manifest Validation Tests
+# =============================================================================
+
+log_section "Section 3: Manifest Validation"
+
+log_test "validate_manifest fails for unsupported schema version"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/unsupported-schema.json"
+# Need to call read_manifest first (it succeeds since JSON is valid)
+read_manifest 2>/dev/null || true
+set +e
+output=$(validate_manifest 2>&1)
+exit_code=$?
+set -e
+assert_not_equals "0" "$exit_code" "validate_manifest fails for schema version 2"
+
+log_test "validate_manifest fails for invalid upstream_repo format"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/invalid-upstream-repo.json"
+read_manifest 2>/dev/null || true
+set +e
+output=$(validate_manifest 2>&1)
+exit_code=$?
+set -e
+assert_not_equals "0" "$exit_code" "validate_manifest fails for invalid upstream_repo format"
+
+log_test "validate_manifest succeeds for valid manifest"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+read_manifest 2>/dev/null || true
+set +e
+output=$(validate_manifest 2>&1)
+exit_code=$?
+set -e
+assert_equals "0" "$exit_code" "validate_manifest succeeds for valid manifest"
+
+# =============================================================================
+# Section 3b: Manifest Variable Backfill Tests
+# =============================================================================
+
+log_section "Section 3b: Manifest Variable Backfill"
+
+log_test "backfill_manifest_variables adds CC_STATUSLINE when missing"
+reset_globals
+test_dir=$(create_temp_dir "backfill-statusline")
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet"
+  }
+}
+EOF
+backfill_manifest_variables 2>/dev/null
+result=$(jq -r '.variables.CC_STATUSLINE' "$MANIFEST_PATH")
+assert_equals "enhanced" "$result" "CC_STATUSLINE backfilled with default 'enhanced'"
+
+log_test "backfill_manifest_variables adds CC_EFFORT_LEVEL when missing"
+reset_globals
+test_dir=$(create_temp_dir "backfill-effort")
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet"
+  }
+}
+EOF
+backfill_manifest_variables 2>/dev/null
+result=$(jq -r '.variables.CC_EFFORT_LEVEL' "$MANIFEST_PATH")
+assert_equals "high" "$result" "CC_EFFORT_LEVEL backfilled with default 'high'"
+
+log_test "backfill_manifest_variables adds all missing variables at once"
+reset_globals
+test_dir=$(create_temp_dir "backfill-all")
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet"
+  }
+}
+EOF
+backfill_manifest_variables 2>/dev/null
+assert_equals "enhanced" "$(jq -r '.variables.CC_STATUSLINE' "$MANIFEST_PATH")" "CC_STATUSLINE backfilled"
+assert_equals "high" "$(jq -r '.variables.CC_EFFORT_LEVEL' "$MANIFEST_PATH")" "CC_EFFORT_LEVEL backfilled"
+assert_equals "default" "$(jq -r '.variables.CC_PERMISSION_MODE' "$MANIFEST_PATH")" "CC_PERMISSION_MODE backfilled"
+assert_equals "false" "$(jq -r '.variables.SKIP_CAPY' "$MANIFEST_PATH")" "SKIP_CAPY backfilled"
+
+log_test "backfill_manifest_variables does not overwrite existing values"
+reset_globals
+test_dir=$(create_temp_dir "backfill-noop")
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet",
+    "CC_EFFORT_LEVEL": "low",
+    "CC_PERMISSION_MODE": "plan",
+    "CC_STATUSLINE": "basic"
+  }
+}
+EOF
+backfill_manifest_variables 2>/dev/null
+assert_equals "low" "$(jq -r '.variables.CC_EFFORT_LEVEL' "$MANIFEST_PATH")" "Existing CC_EFFORT_LEVEL preserved"
+assert_equals "plan" "$(jq -r '.variables.CC_PERMISSION_MODE' "$MANIFEST_PATH")" "Existing CC_PERMISSION_MODE preserved"
+assert_equals "basic" "$(jq -r '.variables.CC_STATUSLINE' "$MANIFEST_PATH")" "Existing CC_STATUSLINE preserved"
+
+log_test "backfill_manifest_variables does not overwrite existing SKIP_CAPY=true"
+reset_globals
+test_dir=$(create_temp_dir "backfill-skip-capy-noop")
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet",
+    "SKIP_CAPY": "true"
+  }
+}
+EOF
+backfill_manifest_variables 2>/dev/null
+assert_equals "true" "$(jq -r '.variables.SKIP_CAPY' "$MANIFEST_PATH")" "Existing SKIP_CAPY=true preserved"
+
+# =============================================================================
+# Section 4: Substitution Tests
+# =============================================================================
+
+log_section "Section 4: Substitution Application"
+
+log_test "apply_substitutions handles CC_MODEL=default (removes model line)"
+reset_globals
+test_dir=$(create_temp_dir "subst-model-test")
+
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "test/repo",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "default"
+  }
+}
+EOF
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "effortLevel": "high",
+  "permissions": { "defaultMode": "default" },
+  "model": "sonnet",
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+
+# The model key should be removed
+if jq -e '.model' "$output_dir/claude/settings.json" &>/dev/null; then
+  log_fail "CC_MODEL=default should remove model key"
+else
+  log_pass "CC_MODEL=default removes model key from settings"
+fi
+
+log_test "apply_substitutions substitutes non-default CC_MODEL"
+reset_globals
+test_dir=$(create_temp_dir "subst-model-value-test")
+
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "test/repo",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "claude-opus"
+  }
+}
+EOF
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "effortLevel": "high",
+  "permissions": { "defaultMode": "default" },
+  "model": "placeholder",
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+
+result=$(jq -r '.model' "$output_dir/claude/settings.json")
+assert_equals "claude-opus" "$result" "CC_MODEL value substituted"
+
+log_test "apply_substitutions substitutes CC_EFFORT_LEVEL"
+reset_globals
+test_dir=$(create_temp_dir "subst-effort-level-test")
+
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "test/repo",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet",
+    "CC_EFFORT_LEVEL": "medium"
+  }
+}
+EOF
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "effortLevel": "high",
+  "permissions": { "defaultMode": "default" },
+  "model": "sonnet",
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+
+result=$(jq -r '.effortLevel' "$output_dir/claude/settings.json")
+assert_equals "medium" "$result" "CC_EFFORT_LEVEL value substituted"
+
+log_test "apply_substitutions removes effortLevel key when CC_EFFORT_LEVEL=default"
+reset_globals
+test_dir=$(create_temp_dir "subst-effort-level-default-test")
+
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "test/repo",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet",
+    "CC_EFFORT_LEVEL": "default"
+  }
+}
+EOF
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "effortLevel": "high",
+  "permissions": { "defaultMode": "default" },
+  "model": "sonnet",
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+
+if jq -e '.effortLevel' "$output_dir/claude/settings.json" &>/dev/null; then
+  log_fail "CC_EFFORT_LEVEL=default should remove effortLevel key"
+else
+  log_pass "CC_EFFORT_LEVEL=default removes effortLevel key from settings"
+fi
+
+log_test "apply_substitutions defaults CC_EFFORT_LEVEL to high when missing from manifest"
+reset_globals
+test_dir=$(create_temp_dir "subst-effort-level-fallback-test")
+
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "test/repo",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet"
+  }
+}
+EOF
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "effortLevel": "placeholder",
+  "permissions": { "defaultMode": "default" },
+  "model": "sonnet",
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+
+result=$(jq -r '.effortLevel' "$output_dir/claude/settings.json")
+assert_equals "high" "$result" "CC_EFFORT_LEVEL defaults to high when missing"
+
+log_test "apply_substitutions substitutes CC_PERMISSION_MODE"
+reset_globals
+test_dir=$(create_temp_dir "subst-permission-mode-test")
+
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "test/repo",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet",
+    "CC_PERMISSION_MODE": "plan"
+  }
+}
+EOF
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "effortLevel": "high",
+  "permissions": { "defaultMode": "default" },
+  "model": "sonnet",
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+
+result=$(jq -r '.permissions.defaultMode' "$output_dir/claude/settings.json")
+assert_equals "plan" "$result" "CC_PERMISSION_MODE value substituted"
+
+log_test "apply_substitutions defaults CC_PERMISSION_MODE to default when missing from manifest"
+reset_globals
+test_dir=$(create_temp_dir "subst-permission-mode-fallback-test")
+
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "test/repo",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet"
+  }
+}
+EOF
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "effortLevel": "high",
+  "permissions": { "defaultMode": "placeholder" },
+  "model": "sonnet",
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+
+result=$(jq -r '.permissions.defaultMode' "$output_dir/claude/settings.json")
+assert_equals "default" "$result" "CC_PERMISSION_MODE defaults to default when missing"
+
+# --- Codex SKIP_CAPY Tests ---
+
+log_test "apply_substitutions strips [mcp_servers.capy] when SKIP_CAPY=true"
+reset_globals
+test_dir=$(create_temp_dir "subst-skip-capy-true")
+
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "test/repo",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet",
+    "SKIP_CAPY": "true"
+  }
+}
+EOF
+
+mkdir -p "$test_dir/templates/codex"
+cat >"$test_dir/templates/codex/config.toml" <<'EOF'
+model = "gpt-5.6-sol"
+approval_policy = "on-request"
+
+[features]
+hooks = true
+
+[mcp_servers.capy]
+command = "bash"
+args = [".codex/scripts/capy.sh", "serve"]
+EOF
+
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+
+if grep -q '\[mcp_servers\.capy\]' "$output_dir/codex/config.toml"; then
+  log_fail "[mcp_servers.capy] should be stripped when SKIP_CAPY=true"
+else
+  log_pass "[mcp_servers.capy] stripped when SKIP_CAPY=true"
+fi
+# Verify the rest of the config is preserved
+if grep -q '\[features\]' "$output_dir/codex/config.toml"; then
+  log_pass "Non-capy sections preserved after stripping"
+else
+  log_fail "Non-capy sections should be preserved"
+fi
+
+log_test "apply_substitutions preserves [mcp_servers.capy] when SKIP_CAPY=false"
+reset_globals
+test_dir=$(create_temp_dir "subst-skip-capy-false")
+
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "test/repo",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet",
+    "SKIP_CAPY": "false"
+  }
+}
+EOF
+
+mkdir -p "$test_dir/templates/codex"
+cat >"$test_dir/templates/codex/config.toml" <<'EOF'
+model = "gpt-5.6-sol"
+approval_policy = "on-request"
+
+[mcp_servers.capy]
+command = "bash"
+args = [".codex/scripts/capy.sh", "serve"]
+EOF
+
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+
+if grep -q '\[mcp_servers\.capy\]' "$output_dir/codex/config.toml"; then
+  log_pass "[mcp_servers.capy] preserved when SKIP_CAPY=false"
+else
+  log_fail "[mcp_servers.capy] should be preserved when SKIP_CAPY=false"
+fi
+
+log_test "apply_substitutions preserves [mcp_servers.capy] when SKIP_CAPY is missing (default)"
+reset_globals
+test_dir=$(create_temp_dir "subst-skip-capy-default")
+
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "test/repo",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet"
+  }
+}
+EOF
+
+mkdir -p "$test_dir/templates/codex"
+cat >"$test_dir/templates/codex/config.toml" <<'EOF'
+model = "gpt-5.6-sol"
+approval_policy = "on-request"
+
+[mcp_servers.capy]
+command = "bash"
+args = [".codex/scripts/capy.sh", "serve"]
+EOF
+
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+
+if grep -q '\[mcp_servers\.capy\]' "$output_dir/codex/config.toml"; then
+  log_pass "[mcp_servers.capy] preserved when SKIP_CAPY not in manifest"
+else
+  log_fail "[mcp_servers.capy] should be preserved when SKIP_CAPY is missing (defaults to false)"
+fi
+
+# =============================================================================
+# Section 5: Smart Merge Tests
+# =============================================================================
+
+log_section "Section 5: Smart Merge (settings.json)"
+
+# Helper: create a standard manifest for smart merge tests
+create_merge_test_manifest() {
+  local manifest_path="$1"
+  local cc_model="${2:-sonnet}"
+  cat >"$manifest_path" <<EOF
+{
+  "schema_version": "1",
+  "upstream_repo": "test/repo",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test-proj",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "$cc_model"
+  }
+}
+EOF
+}
+
+log_test "smart merge: downstream scalar wins over upstream"
+reset_globals
+test_dir=$(create_temp_dir "merge-scalar-wins")
+create_merge_test_manifest "$test_dir/manifest.json" "medium-model"
+MANIFEST_PATH="$test_dir/manifest.json"
+
+# Upstream template
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "effortLevel": "high",
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+# Downstream project
+mkdir -p "$test_dir/project/.claude"
+cat >"$test_dir/project/.claude/settings.json" <<'EOF'
+{
+  "effortLevel": "medium",
+  "permissions": { "defaultMode": "plan" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+pushd "$test_dir/project" >/dev/null
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+popd >/dev/null
+
+# This tests the full pipeline: merge keeps downstream's "medium", then manifest
+# substitution overrides to "high" (CC_EFFORT_LEVEL defaults to "high").
+# Scalar merge preservation is validated by the "nested object merge" test below
+# where env.B stays as the downstream value with no manifest override.
+result=$(jq -r '.effortLevel' "$output_dir/claude/settings.json")
+assert_equals "high" "$result" "effortLevel set by manifest default after merge"
+
+log_test "smart merge: new key from upstream added to downstream"
+reset_globals
+test_dir=$(create_temp_dir "merge-new-key")
+create_merge_test_manifest "$test_dir/manifest.json"
+MANIFEST_PATH="$test_dir/manifest.json"
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "effortLevel": "high",
+  "enabledPlugins": { "kk@claude-toolbox": true },
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+mkdir -p "$test_dir/project/.claude"
+cat >"$test_dir/project/.claude/settings.json" <<'EOF'
+{
+  "effortLevel": "high",
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+pushd "$test_dir/project" >/dev/null
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+popd >/dev/null
+
+if jq -e '.enabledPlugins["kk@claude-toolbox"]' "$output_dir/claude/settings.json" &>/dev/null; then
+  log_pass "enabledPlugins added from upstream"
+else
+  log_fail "enabledPlugins should be added from upstream when missing in downstream"
+fi
+
+log_test "smart merge: arrays concat and deduplicate"
+reset_globals
+test_dir=$(create_temp_dir "merge-array-concat")
+create_merge_test_manifest "$test_dir/manifest.json"
+MANIFEST_PATH="$test_dir/manifest.json"
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "permissions": {
+    "allow": ["Bash(cat:*)", "WebSearch"],
+    "defaultMode": "default"
+  },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+mkdir -p "$test_dir/project/.claude"
+cat >"$test_dir/project/.claude/settings.json" <<'EOF'
+{
+  "permissions": {
+    "allow": ["Bash(cat:*)", "Bash(ls:*)"],
+    "defaultMode": "default"
+  },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+pushd "$test_dir/project" >/dev/null
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+popd >/dev/null
+
+result=$(jq -r '.permissions.allow | length' "$output_dir/claude/settings.json")
+assert_equals "3" "$result" "Allow list has 3 entries (deduped concat)"
+
+# Verify specific entries
+assert_equals "Bash(cat:*)" "$(jq -r '.permissions.allow[0]' "$output_dir/claude/settings.json")" "First entry from downstream preserved"
+assert_equals "Bash(ls:*)" "$(jq -r '.permissions.allow[1]' "$output_dir/claude/settings.json")" "Second entry from downstream preserved"
+assert_equals "WebSearch" "$(jq -r '.permissions.allow[2]' "$output_dir/claude/settings.json")" "Upstream-only entry appended"
+
+log_test "smart merge: deny list propagation from upstream"
+reset_globals
+test_dir=$(create_temp_dir "merge-deny-propagation")
+create_merge_test_manifest "$test_dir/manifest.json"
+MANIFEST_PATH="$test_dir/manifest.json"
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "permissions": {
+    "deny": ["Bash(rm:*)", "Read(*.log)", "Read(*.pyc)"],
+    "defaultMode": "default"
+  },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+mkdir -p "$test_dir/project/.claude"
+cat >"$test_dir/project/.claude/settings.json" <<'EOF'
+{
+  "permissions": {
+    "deny": ["Bash(rm:*)", "Read(*.csv)"],
+    "defaultMode": "default"
+  },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+pushd "$test_dir/project" >/dev/null
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+popd >/dev/null
+
+result=$(jq -r '.permissions.deny | length' "$output_dir/claude/settings.json")
+assert_equals "4" "$result" "Deny list has 4 entries (downstream 2 + upstream 2 new)"
+# Downstream entries first, then upstream additions
+assert_equals "Read(*.csv)" "$(jq -r '.permissions.deny[1]' "$output_dir/claude/settings.json")" "Downstream deny entry preserved"
+assert_equals "Read(*.log)" "$(jq -r '.permissions.deny[2]' "$output_dir/claude/settings.json")" "Upstream deny entry added"
+
+log_test "smart merge: nested object merge (env)"
+reset_globals
+test_dir=$(create_temp_dir "merge-nested-object")
+create_merge_test_manifest "$test_dir/manifest.json"
+MANIFEST_PATH="$test_dir/manifest.json"
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "env": { "A": "1", "B": "upstream-val" },
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+mkdir -p "$test_dir/project/.claude"
+cat >"$test_dir/project/.claude/settings.json" <<'EOF'
+{
+  "env": { "B": "downstream-val", "C": "3" },
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+pushd "$test_dir/project" >/dev/null
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+popd >/dev/null
+
+assert_equals "downstream-val" "$(jq -r '.env.B' "$output_dir/claude/settings.json")" "Downstream env.B preserved"
+assert_equals "3" "$(jq -r '.env.C' "$output_dir/claude/settings.json")" "Downstream env.C preserved"
+assert_equals "1" "$(jq -r '.env.A' "$output_dir/claude/settings.json")" "Upstream env.A added"
+
+log_test "smart merge: manifest substitution overrides merge result"
+reset_globals
+test_dir=$(create_temp_dir "merge-manifest-override")
+create_merge_test_manifest "$test_dir/manifest.json" "haiku"
+MANIFEST_PATH="$test_dir/manifest.json"
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "model": "opus",
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+mkdir -p "$test_dir/project/.claude"
+cat >"$test_dir/project/.claude/settings.json" <<'EOF'
+{
+  "model": "sonnet",
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+pushd "$test_dir/project" >/dev/null
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+popd >/dev/null
+
+result=$(jq -r '.model' "$output_dir/claude/settings.json")
+assert_equals "haiku" "$result" "Manifest CC_MODEL overrides merge result (downstream had sonnet)"
+
+log_test "smart merge: first-time sync uses upstream as-is"
+reset_globals
+test_dir=$(create_temp_dir "merge-first-time")
+create_merge_test_manifest "$test_dir/manifest.json" "opus"
+MANIFEST_PATH="$test_dir/manifest.json"
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "effortLevel": "high",
+  "enabledPlugins": { "kk@claude-toolbox": true },
+  "permissions": { "defaultMode": "default" },
+  "model": "placeholder",
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+# No downstream .claude/settings.json — first-time sync
+mkdir -p "$test_dir/project"
+pushd "$test_dir/project" >/dev/null
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+popd >/dev/null
+
+result=$(jq -r '.model' "$output_dir/claude/settings.json")
+assert_equals "opus" "$result" "Model set from manifest on first-time sync"
+if jq -e '.enabledPlugins' "$output_dir/claude/settings.json" &>/dev/null; then
+  log_pass "enabledPlugins present from upstream template"
+else
+  log_fail "enabledPlugins should be present from upstream on first-time sync"
+fi
+
+log_test "smart merge: empty upstream array does not duplicate downstream entries"
+reset_globals
+test_dir=$(create_temp_dir "merge-empty-array")
+create_merge_test_manifest "$test_dir/manifest.json"
+MANIFEST_PATH="$test_dir/manifest.json"
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "enabledMcpjsonServers": [],
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+mkdir -p "$test_dir/project/.claude"
+cat >"$test_dir/project/.claude/settings.json" <<'EOF'
+{
+  "enabledMcpjsonServers": ["capy"],
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+pushd "$test_dir/project" >/dev/null
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+popd >/dev/null
+
+result=$(jq -r '.enabledMcpjsonServers | length' "$output_dir/claude/settings.json")
+assert_equals "1" "$result" "Empty upstream array does not add entries"
+assert_equals "capy" "$(jq -r '.enabledMcpjsonServers[0]' "$output_dir/claude/settings.json")" "Downstream entry preserved"
+
+log_test "smart merge: type mismatch preserves downstream value"
+reset_globals
+test_dir=$(create_temp_dir "merge-type-mismatch")
+create_merge_test_manifest "$test_dir/manifest.json"
+MANIFEST_PATH="$test_dir/manifest.json"
+
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "customSetting": { "nested": "object" },
+  "anotherSetting": ["an", "array"],
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+mkdir -p "$test_dir/project/.claude"
+cat >"$test_dir/project/.claude/settings.json" <<'EOF'
+{
+  "customSetting": "a-string-not-object",
+  "anotherSetting": "a-string-not-array",
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash statusline_enhanced.sh" }
+}
+EOF
+
+pushd "$test_dir/project" >/dev/null
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+popd >/dev/null
+
+assert_equals "a-string-not-object" "$(jq -r '.customSetting' "$output_dir/claude/settings.json")" "Downstream string preserved when upstream has object"
+assert_equals "a-string-not-array" "$(jq -r '.anotherSetting' "$output_dir/claude/settings.json")" "Downstream string preserved when upstream has array"
+
+log_test "smart merge: statusLine old path migrated to new path"
+reset_globals
+test_dir=$(create_temp_dir "merge-statusline-path")
+create_merge_test_manifest "$test_dir/manifest.json"
+MANIFEST_PATH="$test_dir/manifest.json"
+
+# Upstream template with new path
+mkdir -p "$test_dir/templates/claude"
+cat >"$test_dir/templates/claude/settings.json" <<'EOF'
+{
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash $CLAUDE_PROJECT_DIR/.claude/toolbox/scripts/statusline_enhanced.sh" }
+}
+EOF
+
+# Downstream project with OLD path
+mkdir -p "$test_dir/project/.claude"
+cat >"$test_dir/project/.claude/settings.json" <<'EOF'
+{
+  "permissions": { "defaultMode": "default" },
+  "statusLine": { "command": "bash $CLAUDE_PROJECT_DIR/.claude/scripts/statusline_enhanced.sh" }
+}
+EOF
+
+pushd "$test_dir/project" >/dev/null
+output_dir="$test_dir/output"
+apply_substitutions "$test_dir/templates" "$output_dir" 2>/dev/null
+popd >/dev/null
+
+result=$(jq -r '.statusLine.command' "$output_dir/claude/settings.json")
+assert_output_contains ".claude/toolbox/scripts/" "echo '$result'" "statusLine command uses new toolbox path"
+assert_output_not_contains '\.claude/scripts/s' "echo '$result'" "statusLine command no longer uses old path"
+
+# =============================================================================
+# Section 6: File Comparison Tests
+# =============================================================================
+
+log_section "Section 6: File Comparison"
+
+log_test "compare_files detects added files"
+reset_globals
+test_dir=$(create_temp_dir "compare-added")
+
+# Create staging with a file
+mkdir -p "$test_dir/staging/claude"
+echo "new content" >"$test_dir/staging/claude/new-file.txt"
+
+# Create empty project directory
+mkdir -p "$test_dir/project/.claude"
+
+# Run compare from project directory (use pushd/popd for safe directory handling)
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+assert_equals "1" "${#ADDED_FILES[@]}" "One file detected as added"
+
+log_test "compare_files detects modified files"
+reset_globals
+test_dir=$(create_temp_dir "compare-modified")
+
+# Create staging and project with same file, different content
+mkdir -p "$test_dir/staging/claude"
+mkdir -p "$test_dir/project/.claude"
+echo "new content" >"$test_dir/staging/claude/existing.txt"
+echo "old content" >"$test_dir/project/.claude/existing.txt"
+
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+assert_equals "1" "${#MODIFIED_FILES[@]}" "One file detected as modified"
+
+log_test "compare_files detects deleted files"
+reset_globals
+test_dir=$(create_temp_dir "compare-deleted")
+
+# Create staging without the file, project with it
+mkdir -p "$test_dir/staging/claude"
+mkdir -p "$test_dir/project/.claude"
+echo "to be deleted" >"$test_dir/project/.claude/deleted.txt"
+
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+assert_equals "1" "${#DELETED_FILES[@]}" "One file detected as deleted"
+
+log_test "compare_files detects unchanged files"
+reset_globals
+test_dir=$(create_temp_dir "compare-unchanged")
+
+# Create identical files in staging and project
+mkdir -p "$test_dir/staging/claude"
+mkdir -p "$test_dir/project/.claude"
+echo "same content" >"$test_dir/staging/claude/unchanged.txt"
+echo "same content" >"$test_dir/project/.claude/unchanged.txt"
+
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+assert_equals "1" "${#UNCHANGED_FILES[@]}" "One file detected as unchanged"
+
+log_test "compare_files does NOT flag workflow files as deleted (sync infrastructure exclusion)"
+reset_globals
+test_dir=$(create_temp_dir "compare-workflows-excluded")
+
+# Create staging with only template-sync.yml (mimics what copy_sync_files does)
+mkdir -p "$test_dir/staging/workflows"
+echo "sync workflow content" >"$test_dir/staging/workflows/template-sync.yml"
+
+# Create project with additional workflow files
+mkdir -p "$test_dir/project/.github/workflows"
+echo "sync workflow content" >"$test_dir/project/.github/workflows/template-sync.yml"
+echo "cleanup workflow" >"$test_dir/project/.github/workflows/template-cleanup.yml"
+
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+# template-cleanup.yml should NOT be in DELETED_FILES (workflows/ skips deletion detection)
+assert_equals "0" "${#DELETED_FILES[@]}" "No files should be flagged as deleted in workflows dir"
+# The sync workflow should be detected as unchanged
+assert_equals "1" "${#UNCHANGED_FILES[@]}" "Only the sync workflow file should be compared"
+
+# =============================================================================
+# Section 7: Diff Report Generation Tests
+# =============================================================================
+
+log_section "Section 7: Diff Report Generation"
+
+log_test "generate_diff_report shows version transition"
+reset_globals
+test_dir=$(create_temp_dir "diff-report")
+mkdir -p "$test_dir/staging"
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+RESOLVED_VERSION="v2.0.0"
+ADDED_FILES=()
+MODIFIED_FILES=()
+DELETED_FILES=()
+UNCHANGED_FILES=()
+
+output=$(generate_diff_report "$test_dir/staging" 2>&1)
+assert_output_contains "v1.0.0" "echo '$output'" "Report shows current version"
+assert_output_contains "v2.0.0" "echo '$output'" "Report shows target version"
+
+log_test "generate_diff_report shows 'up to date' when no changes"
+reset_globals
+test_dir=$(create_temp_dir "diff-report-nochange")
+mkdir -p "$test_dir/staging"
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+RESOLVED_VERSION="v1.0.0"
+ADDED_FILES=()
+MODIFIED_FILES=()
+DELETED_FILES=()
+UNCHANGED_FILES=()
+
+output=$(generate_diff_report "$test_dir/staging" 2>&1)
+assert_output_contains "up to date" "echo '$output'" "Report shows 'up to date' message"
+
+log_test "generate_diff_report shows counts when changes exist"
+reset_globals
+test_dir=$(create_temp_dir "diff-report-changes")
+mkdir -p "$test_dir/staging"
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+RESOLVED_VERSION="v2.0.0"
+ADDED_FILES=("file1.txt" "file2.txt")
+MODIFIED_FILES=("file3.txt")
+DELETED_FILES=()
+UNCHANGED_FILES=()
+
+output=$(generate_diff_report "$test_dir/staging" 2>&1)
+assert_output_contains "Added" "echo '$output'" "Report shows added count"
+assert_output_contains "Modified" "echo '$output'" "Report shows modified count"
+
+log_test "generate_diff_report CI mode outputs GitHub Actions format"
+reset_globals
+test_dir=$(create_temp_dir "diff-report-ci")
+mkdir -p "$test_dir/staging"
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+RESOLVED_VERSION="v2.0.0"
+CI_MODE=true
+ADDED_FILES=("file1.txt")
+MODIFIED_FILES=()
+DELETED_FILES=()
+UNCHANGED_FILES=()
+
+output=$(generate_diff_report "$test_dir/staging" 2>&1)
+assert_output_contains "has_changes=true" "echo '$output'" "CI mode outputs has_changes"
+assert_output_contains "added_count=1" "echo '$output'" "CI mode outputs added_count"
+
+# =============================================================================
+# Section 8: Sync Infrastructure Copying Tests
+# =============================================================================
+
+log_section "Section 8: Sync Infrastructure Copying"
+
+log_test "copy_sync_files copies workflow when present"
+reset_globals
+test_dir=$(create_temp_dir "copy-sync-workflow")
+
+# Create upstream directory structure with workflow
+mkdir -p "$test_dir/upstream/.github/workflows"
+echo "name: Template Sync" >"$test_dir/upstream/.github/workflows/template-sync.yml"
+
+# Create output directory
+output_dir="$test_dir/output"
+
+copy_sync_files "$test_dir/upstream" "$output_dir" 2>/dev/null
+
+assert_file_exists "$output_dir/workflows/template-sync.yml" "Workflow copied to staging"
+
+log_test "copy_sync_files handles missing workflow gracefully"
+reset_globals
+test_dir=$(create_temp_dir "copy-sync-missing")
+
+# Create upstream directory structure without sync files
+mkdir -p "$test_dir/upstream/.github"
+
+# Create output directory
+output_dir="$test_dir/output"
+
+# Should not fail even if files don't exist
+copy_sync_files "$test_dir/upstream" "$output_dir" 2>/dev/null
+exit_code=$?
+
+assert_equals "0" "$exit_code" "copy_sync_files succeeds even when workflow is missing"
+
+# =============================================================================
+# Section 9: Version Resolution Tests
+# =============================================================================
+
+log_section "Section 9: Version Resolution"
+
+# Note: resolve_version() now resolves symbolic refs (main, master, HEAD) to actual SHAs
+# via git ls-remote. These tests require network access to GitHub.
+
+log_test "resolve_version returns specific tag as-is"
+reset_globals
+# Specific tags are returned without modification
+result=$(resolve_version "v1.0.0" "serpro69/claude-toolbox")
+# Should return the tag name as-is
+assert_equals "v1.0.0" "$result" "Specific tag returned as-is"
+
+log_test "resolve_version resolves 'master' to SHA"
+reset_globals
+set +e
+result=$(resolve_version "master" "serpro69/claude-toolbox" 2>/dev/null)
+exit_code=$?
+set -e
+
+if [[ $exit_code -eq 0 ]]; then
+  # Should be a full SHA (40 hex characters)
+  if [[ "$result" =~ ^[a-f0-9]{40}$ ]]; then
+    log_pass "master resolved to SHA: ${result:0:12}..."
+  else
+    log_fail "master should resolve to 40-char SHA, got: $result"
+  fi
+else
+  log_skip "Network required to resolve 'master' branch"
+fi
+
+log_test "resolve_version resolves 'HEAD' to SHA"
+reset_globals
+set +e
+result=$(resolve_version "HEAD" "serpro69/claude-toolbox" 2>/dev/null)
+exit_code=$?
+set -e
+
+if [[ $exit_code -eq 0 ]]; then
+  # Should be a full SHA (40 hex characters)
+  if [[ "$result" =~ ^[a-f0-9]{40}$ ]]; then
+    log_pass "HEAD resolved to SHA: ${result:0:12}..."
+  else
+    log_fail "HEAD should resolve to 40-char SHA, got: $result"
+  fi
+else
+  log_skip "Network required to resolve HEAD"
+fi
+
+log_test "resolve_version resolves 'latest' to most recent stable tag"
+reset_globals
+set +e
+result=$(resolve_version "latest" "serpro69/claude-toolbox" 2>/dev/null)
+exit_code=$?
+set -e
+
+if [[ $exit_code -eq 0 ]]; then
+  # Should return tag name (human-readable), not SHA
+  if [[ "$result" =~ ^v[0-9] ]]; then
+    log_pass "latest resolved to tag: $result"
+  else
+    log_fail "latest should resolve to tag name, got: $result"
+  fi
+  # Must not resolve to a pre-release (e.g. v0.12.0-rc.3 over v0.12.0)
+  stripped="${result#v}"
+  if [[ "$stripped" == "${stripped%%-*}" ]]; then
+    log_pass "latest resolved to stable release (no pre-release suffix)"
+  else
+    log_fail "latest resolved to pre-release tag: $result"
+  fi
+else
+  log_skip "Network required to resolve 'latest'"
+fi
+
+log_test "resolve_version returns arbitrary values as-is (validation happens during fetch)"
+reset_globals
+# Arbitrary values (like specific tags or SHAs) are returned as-is
+# Validation of whether they exist happens in fetch_upstream_templates()
+result=$(resolve_version "v99.99.99" "serpro69/claude-toolbox")
+assert_equals "v99.99.99" "$result" "Arbitrary value returned as-is"
+
+# =============================================================================
+# Section 10: Sync Exclusion - is_excluded() Tests
+# =============================================================================
+
+log_section "Section 10: Sync Exclusion - is_excluded()"
+
+log_test "is_excluded returns 1 when no exclusions configured"
+reset_globals
+SYNC_EXCLUSIONS=()
+set +e
+is_excluded ".claude/settings.json"
+exit_code=$?
+set -e
+assert_equals "1" "$exit_code" "No exclusions means not excluded"
+
+log_test "is_excluded returns 0 for exact path match"
+reset_globals
+SYNC_EXCLUSIONS=(".claude/commands/chain-of-verification/default.md")
+set +e
+is_excluded ".claude/commands/chain-of-verification/default.md"
+exit_code=$?
+set -e
+assert_equals "0" "$exit_code" "Exact path match is excluded"
+
+log_test "is_excluded returns 0 for glob pattern with trailing wildcard"
+reset_globals
+SYNC_EXCLUSIONS=(".claude/commands/chain-of-verification/*")
+set +e
+is_excluded ".claude/commands/chain-of-verification/default.md"
+exit_code=$?
+set -e
+assert_equals "0" "$exit_code" "Glob wildcard matches file in directory"
+
+log_test "is_excluded returns 1 for non-matching path"
+reset_globals
+SYNC_EXCLUSIONS=(".claude/commands/chain-of-verification/*")
+set +e
+is_excluded ".claude/commands/tm/list.md"
+exit_code=$?
+set -e
+assert_equals "1" "$exit_code" "Non-matching path is not excluded"
+
+log_test "is_excluded matches across directory separators (bash case * crosses /)"
+reset_globals
+SYNC_EXCLUSIONS=(".claude/commands/chain-of-verification/*")
+set +e
+is_excluded ".claude/commands/chain-of-verification/subdir/file.md"
+exit_code=$?
+set -e
+assert_equals "0" "$exit_code" "Glob * matches across directory separators"
+
+log_test "is_excluded handles multiple patterns (second pattern matches)"
+reset_globals
+SYNC_EXCLUSIONS=(".codex/config.toml" ".claude/commands/chain-of-verification/*")
+set +e
+is_excluded ".claude/commands/chain-of-verification/default.md"
+exit_code=$?
+set -e
+assert_equals "0" "$exit_code" "Second pattern in list matches"
+
+# =============================================================================
+# Section 11: Manifest sync_exclusions - read_manifest() and validate_manifest()
+# =============================================================================
+
+log_section "Section 11: Manifest sync_exclusions Loading and Validation"
+
+log_test "read_manifest loads sync_exclusions from manifest"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest-with-exclusions.json"
+read_manifest 2>/dev/null
+assert_equals "2" "${#SYNC_EXCLUSIONS[@]}" "SYNC_EXCLUSIONS has 2 patterns"
+assert_equals ".claude/commands/chain-of-verification/*" "${SYNC_EXCLUSIONS[0]}" "First exclusion pattern correct"
+assert_equals ".claude/skills/chain-of-verification/*" "${SYNC_EXCLUSIONS[1]}" "Second exclusion pattern correct"
+
+log_test "read_manifest handles missing sync_exclusions (optional field)"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+read_manifest 2>/dev/null
+assert_equals "0" "${#SYNC_EXCLUSIONS[@]}" "SYNC_EXCLUSIONS is empty when field absent"
+
+log_test "validate_manifest accepts valid sync_exclusions array"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest-with-exclusions.json"
+read_manifest 2>/dev/null || true
+set +e
+output=$(validate_manifest 2>&1)
+exit_code=$?
+set -e
+assert_equals "0" "$exit_code" "validate_manifest passes with valid sync_exclusions"
+
+log_test "validate_manifest accepts manifest without sync_exclusions"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+read_manifest 2>/dev/null || true
+set +e
+output=$(validate_manifest 2>&1)
+exit_code=$?
+set -e
+assert_equals "0" "$exit_code" "validate_manifest passes without sync_exclusions"
+
+log_test "validate_manifest rejects sync_exclusions that is not an array"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/exclusions-not-array.json"
+read_manifest 2>/dev/null || true
+set +e
+output=$(validate_manifest 2>&1)
+exit_code=$?
+set -e
+assert_not_equals "0" "$exit_code" "validate_manifest fails when sync_exclusions is a string"
+
+log_test "validate_manifest rejects sync_exclusions with non-string elements"
+reset_globals
+MANIFEST_PATH="$FIXTURES_DIR/manifests/exclusions-non-string-elements.json"
+read_manifest 2>/dev/null || true
+set +e
+output=$(validate_manifest 2>&1)
+exit_code=$?
+set -e
+assert_not_equals "0" "$exit_code" "validate_manifest fails when sync_exclusions contains non-strings"
+
+# =============================================================================
+# Section 12: compare_files() Exclusion Integration Tests
+# =============================================================================
+
+log_section "Section 12: compare_files() Exclusion Integration"
+
+log_test "compare_files excludes matching files from ADDED"
+reset_globals
+test_dir=$(create_temp_dir "compare-excl-added")
+
+# Create staging with a file that matches exclusion pattern
+mkdir -p "$test_dir/staging/claude/commands/chain-of-verification"
+echo "excluded content" >"$test_dir/staging/claude/commands/chain-of-verification/default.md"
+
+# Create empty project directory
+mkdir -p "$test_dir/project/.claude/commands/chain-of-verification"
+
+# Set exclusion pattern
+SYNC_EXCLUSIONS=(".claude/commands/chain-of-verification/*")
+
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+assert_equals "0" "${#ADDED_FILES[@]}" "Excluded file not in ADDED_FILES"
+assert_equals "1" "${#EXCLUDED_FILES[@]}" "Excluded file tracked in EXCLUDED_FILES"
+
+log_test "compare_files excludes matching files from MODIFIED"
+reset_globals
+test_dir=$(create_temp_dir "compare-excl-modified")
+
+# Create staging and project with same file (different content) matching exclusion
+mkdir -p "$test_dir/staging/claude/commands/chain-of-verification"
+mkdir -p "$test_dir/project/.claude/commands/chain-of-verification"
+echo "new content" >"$test_dir/staging/claude/commands/chain-of-verification/default.md"
+echo "old content" >"$test_dir/project/.claude/commands/chain-of-verification/default.md"
+
+SYNC_EXCLUSIONS=(".claude/commands/chain-of-verification/*")
+
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+assert_equals "0" "${#MODIFIED_FILES[@]}" "Excluded file not in MODIFIED_FILES"
+assert_equals "1" "${#EXCLUDED_FILES[@]}" "Excluded file tracked in EXCLUDED_FILES"
+
+log_test "compare_files skips excluded files in deletion detection"
+reset_globals
+test_dir=$(create_temp_dir "compare-excl-deleted")
+
+# Create project with file matching exclusion (not in staging)
+mkdir -p "$test_dir/staging/claude"
+mkdir -p "$test_dir/project/.claude/commands/chain-of-verification"
+echo "local only" >"$test_dir/project/.claude/commands/chain-of-verification/default.md"
+
+SYNC_EXCLUSIONS=(".claude/commands/chain-of-verification/*")
+
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+assert_equals "0" "${#DELETED_FILES[@]}" "Excluded file not in DELETED_FILES"
+
+log_test "compare_files categorizes non-excluded files normally alongside exclusions"
+reset_globals
+test_dir=$(create_temp_dir "compare-excl-mixed")
+
+# Create staging with excluded and non-excluded files
+mkdir -p "$test_dir/staging/claude/commands/chain-of-verification"
+mkdir -p "$test_dir/staging/claude/commands/tm"
+echo "excluded" >"$test_dir/staging/claude/commands/chain-of-verification/default.md"
+echo "included" >"$test_dir/staging/claude/commands/tm/list.md"
+
+# Create empty project dirs
+mkdir -p "$test_dir/project/.claude/commands/chain-of-verification"
+mkdir -p "$test_dir/project/.claude/commands/tm"
+
+SYNC_EXCLUSIONS=(".claude/commands/chain-of-verification/*")
+
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+assert_equals "1" "${#ADDED_FILES[@]}" "Non-excluded file still categorized as added"
+assert_equals "1" "${#EXCLUDED_FILES[@]}" "Excluded file tracked"
+assert_equals "0" "${#MODIFIED_FILES[@]}" "No modified files"
+
+log_test "compare_files does NOT flag per-repo built-in excluded files as deleted"
+# Regression: fetch_upstream_templates strips .claude/settings.local.json,
+# .claude/capy/, and .claude/scripts/capy.sh from staging because they are
+# per-repo files. compare_files must also skip them during deletion detection
+# or they will be incorrectly reported as deleted on every sync.
+reset_globals
+test_dir=$(create_temp_dir "compare-builtin-excl")
+
+# Empty staging (simulates fetch_upstream_templates after stripping)
+mkdir -p "$test_dir/staging/claude"
+
+# Project has the per-repo files that should never be flagged as deleted
+mkdir -p "$test_dir/project/.claude/capy"
+mkdir -p "$test_dir/project/.claude/scripts"
+echo "{}" >"$test_dir/project/.claude/settings.local.json"
+echo "capy config" >"$test_dir/project/.claude/capy/CLAUDE.md"
+echo "capy script" >"$test_dir/project/.claude/scripts/capy.sh"
+
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+assert_equals "0" "${#DELETED_FILES[@]}" "Built-in excluded files not flagged as deleted"
+
+log_test "compare_files handles multiple exclusion patterns"
+reset_globals
+test_dir=$(create_temp_dir "compare-excl-multi")
+
+# Create staging with files matching different exclusion patterns
+mkdir -p "$test_dir/staging/claude/commands/chain-of-verification"
+mkdir -p "$test_dir/staging/claude/skills/chain-of-verification"
+mkdir -p "$test_dir/staging/claude/commands/tm"
+echo "excluded1" >"$test_dir/staging/claude/commands/chain-of-verification/default.md"
+echo "excluded2" >"$test_dir/staging/claude/skills/chain-of-verification/skill.md"
+echo "included" >"$test_dir/staging/claude/commands/tm/list.md"
+
+# Create empty project dirs
+mkdir -p "$test_dir/project/.claude/commands/chain-of-verification"
+mkdir -p "$test_dir/project/.claude/skills/chain-of-verification"
+mkdir -p "$test_dir/project/.claude/commands/tm"
+
+SYNC_EXCLUSIONS=(".claude/commands/chain-of-verification/*" ".claude/skills/chain-of-verification/*")
+
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+assert_equals "1" "${#ADDED_FILES[@]}" "Non-excluded file categorized as added"
+assert_equals "2" "${#EXCLUDED_FILES[@]}" "Both excluded files tracked"
+
+log_test "compare_files does not double-count files in EXCLUDED_FILES"
+reset_globals
+test_dir=$(create_temp_dir "compare-excl-nodup")
+
+# Create file in both staging and project matching exclusion
+mkdir -p "$test_dir/staging/claude/commands/chain-of-verification"
+mkdir -p "$test_dir/project/.claude/commands/chain-of-verification"
+echo "same content" >"$test_dir/staging/claude/commands/chain-of-verification/default.md"
+echo "same content" >"$test_dir/project/.claude/commands/chain-of-verification/default.md"
+
+SYNC_EXCLUSIONS=(".claude/commands/chain-of-verification/*")
+
+pushd "$test_dir/project" >/dev/null || {
+  log_fail "Failed to cd to test directory"
+  exit 1
+}
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+popd >/dev/null || true
+
+assert_equals "1" "${#EXCLUDED_FILES[@]}" "Excluded file counted only once (not double-counted)"
+assert_equals "0" "${#UNCHANGED_FILES[@]}" "Excluded file not in UNCHANGED_FILES"
+
+# =============================================================================
+# Section 13: Reporting Functions - Excluded Files Display
+# =============================================================================
+
+log_section "Section 13: Reporting Functions - Excluded Files Display"
+
+log_test "generate_diff_report shows excluded count in summary"
+reset_globals
+test_dir=$(create_temp_dir "diff-report-excluded-summary")
+mkdir -p "$test_dir/staging"
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+RESOLVED_VERSION="v2.0.0"
+ADDED_FILES=("file1.txt")
+MODIFIED_FILES=()
+DELETED_FILES=()
+UNCHANGED_FILES=()
+EXCLUDED_FILES=(".claude/commands/chain-of-verification/default.md" ".claude/skills/chain-of-verification/SKILL.md")
+
+output=$(generate_diff_report "$test_dir/staging" 2>&1)
+assert_output_contains "Excluded:" "echo '$output'" "Report shows 'Excluded:' line in summary"
+
+log_test "generate_diff_report lists excluded files with marker"
+reset_globals
+test_dir=$(create_temp_dir "diff-report-excluded-list")
+mkdir -p "$test_dir/staging"
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+RESOLVED_VERSION="v2.0.0"
+ADDED_FILES=("file1.txt")
+MODIFIED_FILES=()
+DELETED_FILES=()
+UNCHANGED_FILES=()
+EXCLUDED_FILES=(".claude/commands/chain-of-verification/default.md" ".claude/skills/chain-of-verification/SKILL.md")
+
+output=$(generate_diff_report "$test_dir/staging" 2>&1)
+assert_output_contains "Excluded files (via sync_exclusions):" "echo '$output'" "Report shows excluded files header"
+assert_output_contains ".claude/commands/chain-of-verification/default.md" "echo '$output'" "Report lists first excluded file"
+assert_output_contains ".claude/skills/chain-of-verification/SKILL.md" "echo '$output'" "Report lists second excluded file"
+
+log_test "generate_diff_report CI mode includes excluded_count"
+reset_globals
+test_dir=$(create_temp_dir "diff-report-ci-excluded")
+mkdir -p "$test_dir/staging"
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+RESOLVED_VERSION="v2.0.0"
+CI_MODE=true
+ADDED_FILES=()
+MODIFIED_FILES=()
+DELETED_FILES=()
+UNCHANGED_FILES=()
+EXCLUDED_FILES=(".claude/commands/chain-of-verification/default.md" ".claude/skills/chain-of-verification/SKILL.md")
+
+output=$(generate_diff_report "$test_dir/staging" 2>&1)
+assert_output_contains "excluded_count=2" "echo '$output'" "CI mode outputs excluded_count=2"
+
+log_test "excluded_count does NOT affect has_changes"
+reset_globals
+test_dir=$(create_temp_dir "diff-report-excluded-no-changes")
+mkdir -p "$test_dir/staging"
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+RESOLVED_VERSION="v2.0.0"
+CI_MODE=true
+ADDED_FILES=()
+MODIFIED_FILES=()
+DELETED_FILES=()
+UNCHANGED_FILES=()
+EXCLUDED_FILES=(".claude/commands/chain-of-verification/default.md")
+
+output=$(generate_diff_report "$test_dir/staging" 2>&1)
+assert_output_contains "has_changes=false" "echo '$output'" "has_changes is false when only excluded files present"
+assert_output_contains "excluded_count=1" "echo '$output'" "excluded_count still reported"
+
+log_test "generate_markdown_summary includes excluded files section"
+reset_globals
+test_dir=$(create_temp_dir "markdown-summary-excluded")
+mkdir -p "$test_dir/staging"
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+RESOLVED_VERSION="v2.0.0"
+ADDED_FILES=()
+MODIFIED_FILES=()
+DELETED_FILES=()
+EXCLUDED_FILES=(".claude/commands/chain-of-verification/default.md" ".claude/skills/chain-of-verification/SKILL.md")
+
+output=$(generate_markdown_summary "$test_dir/staging" 2>&1)
+assert_output_contains "| Excluded | 2 |" "echo '$output'" "Markdown table contains Excluded row"
+assert_output_contains "### Excluded Files" "echo '$output'" "Markdown contains Excluded Files heading"
+assert_output_contains "sync_exclusions" "echo '$output'" "Markdown contains explanatory text about sync_exclusions"
+assert_output_contains ".claude/commands/chain-of-verification/default.md" "echo '$output'" "Markdown lists first excluded file"
+assert_output_contains ".claude/skills/chain-of-verification/SKILL.md" "echo '$output'" "Markdown lists second excluded file"
+
+log_test "generate_diff_report does not show excluded section when no exclusions"
+reset_globals
+test_dir=$(create_temp_dir "diff-report-no-excluded")
+mkdir -p "$test_dir/staging"
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+RESOLVED_VERSION="v2.0.0"
+ADDED_FILES=("file1.txt")
+MODIFIED_FILES=()
+DELETED_FILES=()
+UNCHANGED_FILES=()
+EXCLUDED_FILES=()
+
+output=$(generate_diff_report "$test_dir/staging" 2>&1)
+# Should NOT contain the excluded files header when there are no exclusions
+if [[ "$output" == *"Excluded files (via sync_exclusions):"* ]]; then
+  log_fail "Report should not show excluded files section when EXCLUDED_FILES is empty"
+else
+  log_pass "Report correctly omits excluded files section when no exclusions"
+fi
+
+log_test "generate_markdown_summary omits excluded section when no exclusions"
+reset_globals
+test_dir=$(create_temp_dir "markdown-no-excluded")
+mkdir -p "$test_dir/staging"
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+RESOLVED_VERSION="v2.0.0"
+ADDED_FILES=("file1.txt")
+MODIFIED_FILES=()
+DELETED_FILES=()
+EXCLUDED_FILES=()
+
+output=$(generate_markdown_summary "$test_dir/staging" 2>&1)
+assert_output_contains "| Excluded | 0 |" "echo '$output'" "Markdown table shows Excluded count 0"
+if [[ "$output" == *"### Excluded Files"* ]]; then
+  log_fail "Markdown should not show Excluded Files section when EXCLUDED_FILES is empty"
+else
+  log_pass "Markdown correctly omits Excluded Files section when no exclusions"
+fi
+
+# =============================================================================
+# Section 14: Manifest Migration Tests
+# =============================================================================
+
+log_section "Section 14: Manifest Migration"
+
+log_test "migrate_manifest rewrites old upstream_repo to new value"
+reset_globals
+test_dir=$(mktemp -d)
+cat > "$test_dir/manifest.json" <<'JSON'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-starter-kit",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "my-project",
+    "LANGUAGES": "typescript",
+    "CC_MODEL": "sonnet"
+  }
+}
+JSON
+MANIFEST_PATH="$test_dir/manifest.json"
+read_manifest
+validate_manifest
+migrate_manifest
+result=$(jq -r '.upstream_repo' "$MANIFEST_PATH")
+assert_equals "serpro69/claude-toolbox" "$result" "upstream_repo rewritten to serpro69/claude-toolbox"
+rm -rf "$test_dir"
+
+log_test "migrate_manifest does not modify manifest with current upstream_repo"
+reset_globals
+test_dir=$(mktemp -d)
+cp "$FIXTURES_DIR/manifests/valid-manifest.json" "$test_dir/manifest.json"
+MANIFEST_PATH="$test_dir/manifest.json"
+read_manifest
+validate_manifest
+# Capture file checksum before migration
+before=$(md5sum "$MANIFEST_PATH" | cut -d' ' -f1)
+migrate_manifest
+after=$(md5sum "$MANIFEST_PATH" | cut -d' ' -f1)
+assert_equals "$before" "$after" "manifest not modified when upstream_repo is already current"
+rm -rf "$test_dir"
+
+log_test "migrate_manifest emits log message when migration triggers"
+reset_globals
+test_dir=$(mktemp -d)
+cat > "$test_dir/manifest.json" <<'JSON'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-starter-kit",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "my-project",
+    "LANGUAGES": "typescript",
+    "CC_MODEL": "sonnet"
+  }
+}
+JSON
+MANIFEST_PATH="$test_dir/manifest.json"
+read_manifest
+validate_manifest
+output=$(migrate_manifest 2>&1)
+assert_output_contains "Migrating upstream_repo" "echo '$output'" "migration emits log message"
+rm -rf "$test_dir"
+
+# =============================================================================
+# Section: Plugin Migration Detection
+# =============================================================================
+
+log_section "Plugin Migration Detection"
+
+log_test "needs_plugin_migration returns true when upstream has plugin and not yet migrated"
+reset_globals
+test_dir=$(create_temp_dir "plugin-migration")
+# Create upstream with plugin manifest
+mkdir -p "$test_dir/upstream/klaude-plugin/.claude-plugin"
+echo '{"name":"kk"}' > "$test_dir/upstream/klaude-plugin/.claude-plugin/plugin.json"
+# Create manifest without plugin_migrated flag
+mkdir -p "$test_dir/project/.github"
+cat > "$test_dir/project/.github/template-state.json" <<'JSON'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v0.4.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "default"
+  }
+}
+JSON
+MANIFEST_PATH="$test_dir/project/.github/template-state.json"
+if needs_plugin_migration "$test_dir/upstream"; then
+  log_pass "Migration needed when upstream has plugin and no flag set"
+else
+  log_fail "Should need migration when upstream has plugin and no plugin_migrated flag"
+fi
+
+log_test "needs_plugin_migration returns false when already migrated"
+reset_globals
+# Add plugin_migrated flag
+jq '.plugin_migrated = true' "$test_dir/project/.github/template-state.json" > "$test_dir/project/.github/template-state.json.tmp"
+mv "$test_dir/project/.github/template-state.json.tmp" "$test_dir/project/.github/template-state.json"
+MANIFEST_PATH="$test_dir/project/.github/template-state.json"
+if needs_plugin_migration "$test_dir/upstream"; then
+  log_fail "Should not need migration when plugin_migrated is true"
+else
+  log_pass "No migration needed when plugin_migrated flag is set"
+fi
+
+log_test "needs_plugin_migration returns false when upstream has no plugin"
+reset_globals
+test_dir2=$(create_temp_dir "plugin-migration-no-upstream")
+# Upstream without plugin manifest
+mkdir -p "$test_dir2/upstream"
+mkdir -p "$test_dir2/project/.github"
+cat > "$test_dir2/project/.github/template-state.json" <<'JSON'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v0.3.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "default"
+  }
+}
+JSON
+MANIFEST_PATH="$test_dir2/project/.github/template-state.json"
+if needs_plugin_migration "$test_dir2/upstream"; then
+  log_fail "Should not need migration when upstream has no plugin"
+else
+  log_pass "No migration needed when upstream lacks plugin manifest"
+fi
+
+# =============================================================================
+# Section: Plugin Migration Execution
+# =============================================================================
+
+log_section "Plugin Migration Execution"
+
+log_test "run_plugin_migration removes skills, commands, and validate-bash.sh"
+reset_globals
+test_dir=$(create_temp_dir "plugin-exec")
+mkdir -p "$test_dir/.claude/skills/cove" "$test_dir/.claude/skills/analysis-process"
+mkdir -p "$test_dir/.claude/commands/cove" "$test_dir/.claude/commands/sync-workflow"
+mkdir -p "$test_dir/.claude/scripts"
+echo "skill" > "$test_dir/.claude/skills/cove/SKILL.md"
+echo "skill" > "$test_dir/.claude/skills/analysis-process/SKILL.md"
+echo "cmd" > "$test_dir/.claude/commands/cove/cove.md"
+echo "cmd" > "$test_dir/.claude/commands/sync-workflow/sync-workflow.md"
+echo "script" > "$test_dir/.claude/scripts/validate-bash.sh"
+echo "keep" > "$test_dir/.claude/scripts/statusline.sh"
+cat > "$test_dir/.claude/settings.json" <<'JSON'
+{
+  "hooks": {"PreToolUse": [{"matcher": "Bash"}]},
+  "model": "sonnet"
+}
+JSON
+mkdir -p "$test_dir/.github"
+cat > "$test_dir/.github/template-state.json" <<'JSON'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v0.4.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "default"
+  }
+}
+JSON
+MANIFEST_PATH="$test_dir/.github/template-state.json"
+DELETED_FILES=()
+APPLY_MODE=true
+pushd "$test_dir" >/dev/null
+run_plugin_migration >/dev/null 2>&1
+popd >/dev/null
+APPLY_MODE=false
+
+# Verify deletions
+if [[ ! -d "$test_dir/.claude/skills" ]]; then
+  log_pass "skills/ directory removed"
+else
+  log_fail "skills/ directory should be removed"
+fi
+if [[ ! -d "$test_dir/.claude/commands" ]]; then
+  log_pass "commands/ directory removed"
+else
+  log_fail "commands/ directory should be removed"
+fi
+if [[ ! -f "$test_dir/.claude/scripts/validate-bash.sh" ]]; then
+  log_pass "validate-bash.sh removed"
+else
+  log_fail "validate-bash.sh should be removed"
+fi
+# statusline.sh should be preserved
+assert_file_exists "$test_dir/.claude/scripts/statusline.sh" "statusline.sh preserved"
+
+log_test "run_plugin_migration updates settings.json"
+settings_json=$(cat "$test_dir/.claude/settings.json")
+if echo "$settings_json" | jq -e '.hooks' &>/dev/null; then
+  log_fail "hooks should be removed from settings.json"
+else
+  log_pass "hooks removed from settings.json"
+fi
+if echo "$settings_json" | jq -e '.extraKnownMarketplaces' &>/dev/null; then
+  log_pass "extraKnownMarketplaces added to settings.json"
+else
+  log_fail "extraKnownMarketplaces should be added to settings.json"
+fi
+if echo "$settings_json" | jq -e '.enabledPlugins' &>/dev/null; then
+  log_fail "enabledPlugins should not be set (user installs plugin separately)"
+else
+  log_pass "enabledPlugins not set in migrated settings.json"
+fi
+# model should be preserved
+assert_json_field "$settings_json" '.model' "sonnet" "model preserved in settings.json"
+
+log_test "run_plugin_migration sets plugin_migrated flag in manifest"
+manifest_json=$(cat "$test_dir/.github/template-state.json")
+if echo "$manifest_json" | jq -e '.plugin_migrated == true' &>/dev/null; then
+  log_pass "plugin_migrated flag set in manifest"
+else
+  log_fail "plugin_migrated should be true in manifest"
+fi
+
+log_test "run_plugin_migration tracks deleted files"
+if [[ ${#DELETED_FILES[@]} -gt 0 ]]; then
+  log_pass "DELETED_FILES populated (${#DELETED_FILES[@]} entries)"
+else
+  log_fail "DELETED_FILES should have entries for removed files"
+fi
+
+# =============================================================================
+# Section: Serena Removal Migration
+# =============================================================================
+
+log_section "Serena Removal Migration"
+
+log_test "needs_serena_removal returns true when SERENA_INITIAL_PROMPT in manifest"
+reset_globals
+test_dir=$(create_temp_dir "serena-needs-remove")
+mkdir -p "$test_dir/.serena"
+echo "project_name: test" > "$test_dir/.serena/project.yml"
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet",
+    "SERENA_INITIAL_PROMPT": ""
+  }
+}
+EOF
+read_manifest
+pushd "$test_dir" >/dev/null
+if needs_serena_removal; then
+  log_pass "needs_serena_removal detected SERENA_INITIAL_PROMPT in manifest"
+else
+  log_fail "needs_serena_removal should return true when SERENA_INITIAL_PROMPT exists"
+fi
+popd >/dev/null
+
+log_test "needs_serena_removal returns false when no serena artifacts exist"
+reset_globals
+test_dir=$(create_temp_dir "serena-already-clean")
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet"
+  }
+}
+EOF
+read_manifest
+pushd "$test_dir" >/dev/null
+if needs_serena_removal; then
+  log_fail "needs_serena_removal should return false when no serena artifacts exist"
+else
+  log_pass "needs_serena_removal correctly skips clean repos"
+fi
+popd >/dev/null
+
+log_test "run_serena_removal deletes .serena/ and cleans manifest"
+reset_globals
+test_dir=$(create_temp_dir "serena-run-remove")
+mkdir -p "$test_dir/.serena"
+echo "project_name: test" > "$test_dir/.serena/project.yml"
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet",
+    "SERENA_INITIAL_PROMPT": ""
+  }
+}
+EOF
+read_manifest
+APPLY_MODE=true
+pushd "$test_dir" >/dev/null
+run_serena_removal 2>/dev/null
+
+if [[ ! -d ".serena" ]]; then
+  log_pass ".serena/ directory removed"
+else
+  log_fail ".serena/ directory should have been removed"
+fi
+
+if jq -e '.variables.SERENA_INITIAL_PROMPT' "$MANIFEST_PATH" &>/dev/null 2>&1; then
+  log_fail "SERENA_INITIAL_PROMPT should have been removed from manifest"
+else
+  log_pass "SERENA_INITIAL_PROMPT removed from manifest"
+fi
+popd >/dev/null
+APPLY_MODE=false
+
+log_test "run_serena_removal respects sync_exclusions for .serena/"
+reset_globals
+test_dir=$(create_temp_dir "serena-excluded")
+mkdir -p "$test_dir/.serena"
+echo "project_name: test" > "$test_dir/.serena/project.yml"
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet",
+    "SERENA_INITIAL_PROMPT": ""
+  },
+  "sync_exclusions": [".serena/*"]
+}
+EOF
+read_manifest
+# Load exclusions the same way validate_manifest does
+mapfile -t SYNC_EXCLUSIONS < <(jq -r '.sync_exclusions[]' "$MANIFEST_PATH")
+APPLY_MODE=true
+pushd "$test_dir" >/dev/null
+run_serena_removal 2>/dev/null
+
+if [[ -d ".serena" ]]; then
+  log_pass ".serena/ preserved when in sync_exclusions"
+else
+  log_fail ".serena/ should have been preserved (matched sync_exclusions)"
+fi
+
+# Manifest variable should still be cleaned even when dir is excluded
+if jq -e '.variables.SERENA_INITIAL_PROMPT' "$MANIFEST_PATH" &>/dev/null 2>&1; then
+  log_fail "SERENA_INITIAL_PROMPT should still be removed from manifest"
+else
+  log_pass "SERENA_INITIAL_PROMPT removed from manifest even when dir excluded"
+fi
+popd >/dev/null
+APPLY_MODE=false
+
+# =============================================================================
+# Section: json_update helper
+# =============================================================================
+
+log_section "json_update helper"
+
+log_test "json_update modifies file atomically"
+reset_globals
+test_dir=$(create_temp_dir "json-update-basic")
+echo '{"key": "old"}' > "$test_dir/test.json"
+json_update "$test_dir/test.json" '.key = "new"'
+result=$(jq -r '.key' "$test_dir/test.json")
+assert_equals "new" "$result" "json_update sets value"
+
+log_test "json_update with --arg passes jq arguments"
+reset_globals
+test_dir=$(create_temp_dir "json-update-arg")
+echo '{"name": "placeholder"}' > "$test_dir/test.json"
+json_update "$test_dir/test.json" '.name = $val' --arg val "injected"
+result=$(jq -r '.name' "$test_dir/test.json")
+assert_equals "injected" "$result" "json_update passes --arg to jq"
+
+log_test "json_update returns 1 on invalid expression"
+reset_globals
+test_dir=$(create_temp_dir "json-update-fail")
+echo '{"key": "value"}' > "$test_dir/test.json"
+if json_update "$test_dir/test.json" 'INVALID EXPRESSION' 2>/dev/null; then
+  log_fail "json_update should return 1 for invalid jq expression"
+else
+  log_pass "json_update returns 1 on failure"
+fi
+# File should be unchanged on failure
+result=$(jq -r '.key' "$test_dir/test.json")
+assert_equals "value" "$result" "file unchanged after failed json_update"
+
+# =============================================================================
+# Section: apply_changes
+# =============================================================================
+
+log_section "apply_changes"
+
+log_test "apply_changes copies staged files to working tree"
+reset_globals
+test_dir=$(create_temp_dir "apply-copy")
+# Set up staging dir with substituted files
+mkdir -p "$test_dir/staging/substituted/claude"
+mkdir -p "$test_dir/staging/upstream/klaude-plugin/.claude-plugin"
+echo '{"name": "test-plugin"}' > "$test_dir/staging/upstream/klaude-plugin/.claude-plugin/plugin.json"
+echo "extra-content" > "$test_dir/staging/substituted/claude/CLAUDE.extra.md"
+# Set up project dir
+mkdir -p "$test_dir/.github"
+cat > "$test_dir/.github/template-state.json" <<'JSON'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v0.1.0",
+  "synced_at": "2025-01-01T00:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "default"
+  }
+}
+JSON
+mkdir -p "$test_dir/.claude"
+MANIFEST_PATH="$test_dir/.github/template-state.json"
+STAGING_DIR="$test_dir/staging"
+APPLY_MODE=true
+read_manifest
+pushd "$test_dir" >/dev/null
+apply_changes "$test_dir/staging/substituted" "v2.0.0" 2>/dev/null
+popd >/dev/null
+APPLY_MODE=false
+
+assert_file_exists "$test_dir/.claude/CLAUDE.extra.md" "staged file copied to .claude/"
+result=$(jq -r '.template_version' "$test_dir/.github/template-state.json")
+assert_equals "v2.0.0" "$result" "manifest version updated"
+# synced_at should be set
+result=$(jq -r '.synced_at' "$test_dir/.github/template-state.json")
+if [[ "$result" != "null" && "$result" != "2025-01-01T00:00:00Z" ]]; then
+  log_pass "synced_at timestamp updated"
+else
+  log_fail "synced_at should be updated to current time"
+fi
+
+log_test "apply_changes auto-imports CLAUDE.extra.md"
+reset_globals
+test_dir=$(create_temp_dir "apply-import")
+mkdir -p "$test_dir/staging/substituted/claude"
+mkdir -p "$test_dir/staging/upstream"
+echo "extra" > "$test_dir/staging/substituted/claude/CLAUDE.extra.md"
+mkdir -p "$test_dir/.github" "$test_dir/.claude"
+cat > "$test_dir/.github/template-state.json" <<'JSON'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v0.1.0",
+  "synced_at": "2025-01-01T00:00:00Z",
+  "variables": { "PROJECT_NAME": "test", "LANGUAGES": "bash", "CC_MODEL": "default" }
+}
+JSON
+echo "# My Project" > "$test_dir/CLAUDE.md"
+MANIFEST_PATH="$test_dir/.github/template-state.json"
+STAGING_DIR="$test_dir/staging"
+APPLY_MODE=true
+read_manifest
+pushd "$test_dir" >/dev/null
+apply_changes "$test_dir/staging/substituted" "v2.0.0" 2>/dev/null
+popd >/dev/null
+APPLY_MODE=false
+
+if grep -q '@.claude/CLAUDE.extra.md' "$test_dir/CLAUDE.md"; then
+  log_pass "CLAUDE.extra.md @import added to CLAUDE.md"
+else
+  log_fail "CLAUDE.extra.md @import should be added to CLAUDE.md"
+fi
+
+log_test "apply_changes skips CLAUDE.extra.md import when already present"
+reset_globals
+test_dir=$(create_temp_dir "apply-import-skip")
+mkdir -p "$test_dir/staging/substituted/claude"
+mkdir -p "$test_dir/staging/upstream"
+echo "extra" > "$test_dir/staging/substituted/claude/CLAUDE.extra.md"
+mkdir -p "$test_dir/.github" "$test_dir/.claude"
+cat > "$test_dir/.github/template-state.json" <<'JSON'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v0.1.0",
+  "synced_at": "2025-01-01T00:00:00Z",
+  "variables": { "PROJECT_NAME": "test", "LANGUAGES": "bash", "CC_MODEL": "default" }
+}
+JSON
+printf '# My Project\n@.claude/CLAUDE.extra.md\n' > "$test_dir/CLAUDE.md"
+MANIFEST_PATH="$test_dir/.github/template-state.json"
+STAGING_DIR="$test_dir/staging"
+APPLY_MODE=true
+read_manifest
+pushd "$test_dir" >/dev/null
+apply_changes "$test_dir/staging/substituted" "v2.0.0" 2>/dev/null
+popd >/dev/null
+APPLY_MODE=false
+
+count=$(grep -c '@.claude/CLAUDE.extra.md' "$test_dir/CLAUDE.md")
+if [[ "$count" -eq 1 ]]; then
+  log_pass "@import not duplicated when already present"
+else
+  log_fail "@import should appear exactly once (found $count)"
+fi
+
+log_test "apply_changes backfills manifest variables"
+reset_globals
+test_dir=$(create_temp_dir "apply-backfill")
+mkdir -p "$test_dir/staging/substituted" "$test_dir/staging/upstream"
+mkdir -p "$test_dir/.github"
+cat > "$test_dir/.github/template-state.json" <<'JSON'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v0.1.0",
+  "synced_at": "2025-01-01T00:00:00Z",
+  "variables": { "PROJECT_NAME": "test", "LANGUAGES": "bash", "CC_MODEL": "default" }
+}
+JSON
+MANIFEST_PATH="$test_dir/.github/template-state.json"
+STAGING_DIR="$test_dir/staging"
+APPLY_MODE=true
+read_manifest
+pushd "$test_dir" >/dev/null
+apply_changes "$test_dir/staging/substituted" "v2.0.0" 2>/dev/null
+popd >/dev/null
+APPLY_MODE=false
+
+result=$(jq -r '.variables.CC_STATUSLINE' "$test_dir/.github/template-state.json")
+assert_equals "enhanced" "$result" "CC_STATUSLINE backfilled"
+result=$(jq -r '.variables.SKIP_CAPY' "$test_dir/.github/template-state.json")
+assert_equals "false" "$result" "SKIP_CAPY backfilled"
+
+# =============================================================================
+# Section: --apply argument parsing
+# =============================================================================
+
+log_section "--apply argument parsing"
+
+log_test "parse_arguments with --apply flag"
+reset_globals
+parse_arguments --apply
+assert_equals "true" "$APPLY_MODE" "--apply sets APPLY_MODE=true"
+
+log_test "parse_arguments without --apply keeps APPLY_MODE=false"
+reset_globals
+parse_arguments --dry-run
+assert_equals "false" "$APPLY_MODE" "APPLY_MODE defaults to false"
+
+log_test "parse_arguments with --apply and --version"
+reset_globals
+parse_arguments --apply --version v3.0.0 --output-dir /tmp/test
+assert_equals "true" "$APPLY_MODE" "--apply with other flags: APPLY_MODE"
+assert_equals "v3.0.0" "$TARGET_VERSION" "--apply with other flags: TARGET_VERSION"
+assert_equals "/tmp/test" "$STAGING_DIR" "--apply with other flags: STAGING_DIR"
+
+# =============================================================================
+# Section: --local argument parsing
+# =============================================================================
+
+log_section "--local argument parsing"
+
+log_test "parse_arguments with --local flag"
+reset_globals
+parse_arguments --local
+assert_equals "true" "$LOCAL_MODE" "--local sets LOCAL_MODE=true"
+
+log_test "parse_arguments with --local and --version"
+reset_globals
+parse_arguments --local --version v2.0.0
+assert_equals "true" "$LOCAL_MODE" "--local with --version: LOCAL_MODE"
+assert_equals "v2.0.0" "$TARGET_VERSION" "--local with --version: TARGET_VERSION"
+
+log_test "--local and --apply are independent"
+reset_globals
+parse_arguments --local
+assert_equals "false" "$APPLY_MODE" "--local does not set APPLY_MODE"
+
+# =============================================================================
+# Section: detect-only mode (APPLY_MODE=false)
+# =============================================================================
+
+log_section "detect-only mode"
+
+log_test "run_plugin_migration in detect mode populates DELETED_FILES without mutations"
+reset_globals
+test_dir=$(create_temp_dir "detect-plugin")
+mkdir -p "$test_dir/.claude/skills/cove"
+echo "skill" > "$test_dir/.claude/skills/cove/SKILL.md"
+mkdir -p "$test_dir/.claude/scripts"
+echo "script" > "$test_dir/.claude/scripts/validate-bash.sh"
+mkdir -p "$test_dir/.github"
+cat > "$test_dir/.github/template-state.json" <<'JSON'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v0.4.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": { "PROJECT_NAME": "test", "LANGUAGES": "bash", "CC_MODEL": "default" }
+}
+JSON
+MANIFEST_PATH="$test_dir/.github/template-state.json"
+DELETED_FILES=()
+APPLY_MODE=false
+pushd "$test_dir" >/dev/null
+run_plugin_migration >/dev/null 2>&1
+popd >/dev/null
+
+# DELETED_FILES should be populated
+if [[ ${#DELETED_FILES[@]} -gt 0 ]]; then
+  log_pass "DELETED_FILES populated in detect mode (${#DELETED_FILES[@]} entries)"
+else
+  log_fail "DELETED_FILES should be populated even in detect mode"
+fi
+# But files should still exist
+assert_file_exists "$test_dir/.claude/skills/cove/SKILL.md" "skill file preserved in detect mode"
+assert_file_exists "$test_dir/.claude/scripts/validate-bash.sh" "validate-bash.sh preserved in detect mode"
+
+log_test "run_serena_removal in detect mode populates arrays without mutations"
+reset_globals
+test_dir=$(create_temp_dir "detect-serena")
+mkdir -p "$test_dir/.serena"
+echo "project_name: test" > "$test_dir/.serena/project.yml"
+MANIFEST_PATH="$test_dir/manifest.json"
+cat >"$MANIFEST_PATH" <<'EOF'
+{
+  "schema_version": "1",
+  "upstream_repo": "serpro69/claude-toolbox",
+  "template_version": "v1.0.0",
+  "synced_at": "2025-01-27T10:00:00Z",
+  "variables": {
+    "PROJECT_NAME": "test",
+    "LANGUAGES": "bash",
+    "CC_MODEL": "sonnet",
+    "SERENA_INITIAL_PROMPT": ""
+  }
+}
+EOF
+read_manifest
+APPLY_MODE=false
+pushd "$test_dir" >/dev/null
+run_serena_removal 2>/dev/null
+popd >/dev/null
+
+if [[ ${#DELETED_FILES[@]} -gt 0 ]]; then
+  log_pass "DELETED_FILES populated in detect mode"
+else
+  log_fail "DELETED_FILES should be populated even in detect mode"
+fi
+# Directory should still exist
+if [[ -d "$test_dir/.serena" ]]; then
+  log_pass ".serena/ preserved in detect mode"
+else
+  log_fail ".serena/ should be preserved when APPLY_MODE=false"
+fi
+# Manifest should NOT be modified in detect mode
+if jq -e '.variables.SERENA_INITIAL_PROMPT' "$MANIFEST_PATH" &>/dev/null 2>&1; then
+  log_pass "SERENA_INITIAL_PROMPT preserved in manifest (detect mode)"
+else
+  log_fail "SERENA_INITIAL_PROMPT should be preserved in detect mode"
+fi
+
+# =============================================================================
+# Section: Script Consolidation Migration
+# =============================================================================
+
+log_section "Script Consolidation Migration"
+
+log_test "needs_script_consolidation returns true when old-location scripts exist"
+reset_globals
+test_dir=$(create_temp_dir "needs-consolidation-true")
+mkdir -p "$test_dir/.github/scripts"
+echo "script" > "$test_dir/.github/scripts/template-sync.sh"
+pushd "$test_dir" >/dev/null
+needs_script_consolidation
+assert_equals "0" "$?" "needs_script_consolidation returns 0 when old scripts exist"
+popd >/dev/null || true
+
+log_test "needs_script_consolidation returns false when no old-location scripts exist"
+reset_globals
+test_dir=$(create_temp_dir "needs-consolidation-false")
+mkdir -p "$test_dir/.claude/toolbox/scripts"
+echo "script" > "$test_dir/.claude/toolbox/scripts/template-sync.sh"
+pushd "$test_dir" >/dev/null
+needs_script_consolidation && rc=0 || rc=$?
+assert_not_equals "0" "$rc" "needs_script_consolidation returns non-zero when no old scripts"
+popd >/dev/null || true
+
+log_test "run_script_consolidation in detect mode populates DELETED_FILES without mutations"
+reset_globals
+test_dir=$(create_temp_dir "detect-consolidation")
+mkdir -p "$test_dir/.github/scripts"
+echo "sync" > "$test_dir/.github/scripts/template-sync.sh"
+echo "semver" > "$test_dir/.github/scripts/semver-compare.sh"
+mkdir -p "$test_dir/.claude/scripts"
+echo "statusline" > "$test_dir/.claude/scripts/statusline.sh"
+mkdir -p "$test_dir/docs"
+echo "update" > "$test_dir/docs/update.sh"
+DELETED_FILES=()
+APPLY_MODE=false
+pushd "$test_dir" >/dev/null
+run_script_consolidation >/dev/null 2>&1
+popd >/dev/null
+
+assert_equals "4" "${#DELETED_FILES[@]}" "DELETED_FILES has 4 entries in detect mode"
+assert_file_exists "$test_dir/.github/scripts/template-sync.sh" "template-sync.sh preserved in detect mode"
+assert_file_exists "$test_dir/.claude/scripts/statusline.sh" "statusline.sh preserved in detect mode"
+assert_file_exists "$test_dir/docs/update.sh" "update.sh preserved in detect mode"
+
+log_test "run_script_consolidation in apply mode removes old files"
+reset_globals
+test_dir=$(create_temp_dir "apply-consolidation")
+mkdir -p "$test_dir/.github/scripts"
+echo "sync" > "$test_dir/.github/scripts/template-sync.sh"
+echo "semver" > "$test_dir/.github/scripts/semver-compare.sh"
+mkdir -p "$test_dir/docs"
+echo "update" > "$test_dir/docs/update.sh"
+DELETED_FILES=()
+APPLY_MODE=true
+pushd "$test_dir" >/dev/null
+run_script_consolidation >/dev/null 2>&1
+popd >/dev/null
+
+assert_equals "3" "${#DELETED_FILES[@]}" "DELETED_FILES has 3 entries in apply mode"
+assert_file_not_exists "$test_dir/.github/scripts/template-sync.sh" "template-sync.sh removed in apply mode"
+assert_file_not_exists "$test_dir/.github/scripts/semver-compare.sh" "semver-compare.sh removed in apply mode"
+assert_file_not_exists "$test_dir/docs/update.sh" "update.sh removed in apply mode"
+
+# =============================================================================
+# Section: Pre-compare deletion preservation
+# =============================================================================
+
+log_section "Pre-compare deletion preservation"
+
+log_test "compare_files preserves pre-compare deletions from script consolidation"
+reset_globals
+test_dir=$(create_temp_dir "preserve-consolidation-deletions")
+
+# Simulate a downstream project with old-location scripts
+mkdir -p "$test_dir/project/.github/scripts"
+echo "sync" > "$test_dir/project/.github/scripts/template-sync.sh"
+mkdir -p "$test_dir/project/docs"
+echo "update" > "$test_dir/project/docs/update.sh"
+# New-location scripts in staging
+mkdir -p "$test_dir/staging/claude/toolbox/scripts"
+echo "sync" > "$test_dir/staging/claude/toolbox/scripts/template-sync.sh"
+echo "update" > "$test_dir/staging/claude/toolbox/scripts/update-docs.sh"
+
+pushd "$test_dir/project" >/dev/null || exit 1
+
+# Simulate what run_script_consolidation does in detect mode
+DELETED_FILES=(".github/scripts/template-sync.sh" "docs/update.sh")
+APPLY_MODE=false
+
+# Save pre-compare deletions (mirrors the fixed main() flow)
+_pre_compare=("${DELETED_FILES[@]}")
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+
+# Merge back with dedup (mirrors the fixed main() flow)
+declare -A _seen=()
+for f in "${DELETED_FILES[@]}"; do _seen["$f"]=1; done
+for f in "${_pre_compare[@]}"; do
+  [[ -z "${_seen[$f]+x}" ]] && DELETED_FILES+=("$f")
+done
+unset _seen
+
+popd >/dev/null || true
+
+# .github/scripts/ and docs/ are outside compare_files dir_map,
+# so they can only appear via the pre-compare merge
+_found_github=false
+_found_docs=false
+for f in "${DELETED_FILES[@]}"; do
+  [[ "$f" == ".github/scripts/template-sync.sh" ]] && _found_github=true
+  [[ "$f" == "docs/update.sh" ]] && _found_docs=true
+done
+
+if $_found_github; then
+  log_pass ".github/scripts/template-sync.sh preserved in DELETED_FILES after compare"
+else
+  log_fail ".github/scripts/template-sync.sh should be in DELETED_FILES after compare"
+fi
+
+if $_found_docs; then
+  log_pass "docs/update.sh preserved in DELETED_FILES after compare"
+else
+  log_fail "docs/update.sh should be in DELETED_FILES after compare"
+fi
+
+log_test "compare_files deduplicates overlapping deletions from .claude/scripts/"
+reset_globals
+test_dir=$(create_temp_dir "dedup-deletions")
+
+# Staging has scripts at new location only
+mkdir -p "$test_dir/staging/claude/toolbox/scripts"
+echo "statusline" > "$test_dir/staging/claude/toolbox/scripts/statusline.sh"
+
+# Project has scripts at old location (in .claude/ scope — compare_files sees these)
+mkdir -p "$test_dir/project/.claude/scripts"
+echo "statusline" > "$test_dir/project/.claude/scripts/statusline.sh"
+
+pushd "$test_dir/project" >/dev/null || exit 1
+
+# Simulate: run_script_consolidation already flagged this file
+DELETED_FILES=(".claude/scripts/statusline.sh")
+APPLY_MODE=false
+
+_pre_compare=("${DELETED_FILES[@]}")
+
+MANIFEST_PATH="$FIXTURES_DIR/manifests/valid-manifest.json"
+compare_files "$test_dir/staging" 2>/dev/null
+
+# compare_files also detects .claude/scripts/statusline.sh as deleted
+# (it's in .claude/ but not in staging/claude/). Merge with dedup.
+declare -A _seen2=()
+for f in "${DELETED_FILES[@]}"; do _seen2["$f"]=1; done
+for f in "${_pre_compare[@]}"; do
+  [[ -z "${_seen2[$f]+x}" ]] && DELETED_FILES+=("$f")
+done
+unset _seen2
+
+popd >/dev/null || true
+
+# Count occurrences — should be exactly 1, not 2
+_count=0
+for f in "${DELETED_FILES[@]}"; do
+  [[ "$f" == ".claude/scripts/statusline.sh" ]] && _count=$((_count + 1))
+done
+
+assert_equals "1" "$_count" ".claude/scripts/statusline.sh appears exactly once (deduplicated)"
+
+# =============================================================================
+# Summary
+# =============================================================================
+
+print_summary

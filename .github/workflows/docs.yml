@@ -1,0 +1,84 @@
+---
+name: Docs
+run-name: ${{ github.actor }} is running Docs
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+    paths:
+      - ".github/workflows/docs.yml"
+      - "docs/**"
+      - "mkdocs.yml"
+      - "requirements.txt"
+      - "README.md"
+      - "LICENSE.md"
+      - "klaude-plugin/**"
+      - "kodex-plugin/README.md"
+      - "cmd/plugin-graph/**"
+      - "Makefile"
+
+permissions:
+  contents: write
+
+env:
+  MKDOCS_SITE_URL: "https://serpro69.github.io/claude-toolbox/"
+
+jobs:
+  deploy:
+    concurrency:
+      group: ${{ github.workflow }}
+      queue: max
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        if: ${{ vars.CLAUDE_TOOLBOX_APP_ID != '' || vars.JEAN_CLAWDER_APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.CLAUDE_TOOLBOX_APP_ID || vars.JEAN_CLAWDER_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_TOOLBOX_APP_KEY || secrets.JEAN_CLAWDER_APP_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Configure git credentials
+        run: |
+          BOT_USER="${BOT_SLUG:-github-actions}[bot]"
+          git config user.name "${BOT_USER}"
+          git config user.email "${BOT_USER}@users.noreply.github.com"
+        env:
+          BOT_SLUG: ${{ steps.app-token.outputs.app-slug }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.x
+      - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
+      - uses: actions/cache@v4
+        with:
+          key: mkdocs-material-${{ env.cache_id }}
+          path: .cache
+          restore-keys: |
+            mkdocs-material-
+      - run: pip install -r requirements.txt
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Regenerate plugin-graph docs
+        run: make plugin-graph-docs
+      - name: Validate docs build (strict)
+        run: mkdocs build --strict --site-dir /tmp/docs-strict-check
+      - run: |-
+          if [[ ! "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            mike deploy --push dev
+          else
+            version_regex='[^0-9]*\([0-9]*\)[.]\([0-9]*\)[.]\([0-9]*\)'
+            version=$(echo "${{ github.ref_name }}" | sed -e "s#${version_regex}#\1.\2#")
+            mike deploy --push --update-aliases "$version" latest
+            mike set-default --push latest
+          fi
