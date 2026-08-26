@@ -1,1 +1,0 @@
-../_shared/pal-codereview-invocation.md

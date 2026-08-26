@@ -1,1 +1,0 @@
-../_shared/review-scope-protocol.md
