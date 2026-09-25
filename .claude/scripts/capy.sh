@@ -11,9 +11,4 @@ for p in "$(command -v capy 2>/dev/null || true)" "$HOME/.local/bin/capy" "/opt/
     "$p" "$@" || true
     exit 0
   fi
-done
-
-# capy not found — deny tool use
-jq -n --arg reason "capy binary not found" \
-	'{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'
-exit 0
+den
